@@ -9,7 +9,7 @@ import (
 type commandInfo struct {
 	ExePath string   `json:"exe_path"`
 	Args    []string `json:"args"`
-	WorkDir string   `json:"workdir"`
+	WorkDir string   `json:"work_dir"`
 	Env     []string `json:"env"`
 }
 
