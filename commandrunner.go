@@ -30,33 +30,57 @@ type CommandRunner struct {
 	lck      sync.Mutex
 	runInsts []*runningInstance
 
-	checkInterval time.Duration
+	checkInterval    time.Duration
+	stopWaitInterval time.Duration
 
 	interruptWaitNano int64
 	terminateWaitNano int64
+	allStopAtNano     int64
 }
 
 func NewCommandRunner(
 	maxRunningCommands int,
-	checkInterval, interruptWaitInterval, terminateWaitInterval time.Duration) (r *CommandRunner) {
+	checkInterval, stopWaitInterval, interruptWaitInterval, terminateWaitInterval time.Duration) (r *CommandRunner) {
 	r = &CommandRunner{
 		runInsts:          make([]*runningInstance, maxRunningCommands),
 		checkInterval:     max(checkInterval, minimumCheckInterval),
+		stopWaitInterval:  max(stopWaitInterval, minimumWaitInterval),
 		interruptWaitNano: max(interruptWaitInterval, minimumWaitInterval).Nanoseconds(),
 		terminateWaitNano: max(terminateWaitInterval, minimumWaitInterval).Nanoseconds(),
 	}
 	return
 }
 
+func (r *CommandRunner) stopAcceptingCommands() {
+	r.lck.Lock()
+	defer r.lck.Unlock()
+	if r.allStopAtNano != 0 {
+		return
+	}
+	r.allStopAtNano = time.Now().Add(r.stopWaitInterval).UnixNano()
+}
+
+func (r *CommandRunner) checkAllStopped() bool {
+	r.lck.Lock()
+	defer r.lck.Unlock()
+	for _, inst := range r.runInsts {
+		if inst != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *CommandRunner) checkIteration() {
 	r.lck.Lock()
 	defer r.lck.Unlock()
 	currentTimeUnixNano := time.Now().UnixNano()
+	normalRunning := (r.allStopAtNano == 0) || (currentTimeUnixNano < r.allStopAtNano)
 	for _, inst := range r.runInsts {
 		if (inst == nil) || (inst.timeoutAtNano == 0) {
 			continue
 		}
-		if currentTimeUnixNano < inst.timeoutAtNano {
+		if normalRunning && (currentTimeUnixNano < inst.timeoutAtNano) {
 			continue
 		}
 		pgid := -(inst.cmdRef.Process.Pid)
@@ -79,12 +103,23 @@ func (r *CommandRunner) checkLoop(ctx context.Context, waitGroup *sync.WaitGroup
 	defer waitGroup.Done()
 	ticker := time.NewTicker(r.checkInterval)
 	defer ticker.Stop()
-	for {
+	acceptingRunCommands := true
+	for acceptingRunCommands {
 		select {
 		case <-ctx.Done():
-			return
+			r.stopAcceptingCommands()
+			acceptingRunCommands = false
 		case <-ticker.C:
 			r.checkIteration()
+		}
+	}
+	if r.checkAllStopped() {
+		return
+	}
+	for range ticker.C {
+		r.checkIteration()
+		if r.checkAllStopped() {
+			return
 		}
 	}
 }
@@ -97,6 +132,10 @@ func (r *CommandRunner) StartRunner(ctx context.Context, waitGroup *sync.WaitGro
 func (r *CommandRunner) allocateRunningInstance() (instRef *runningInstance, err error) {
 	r.lck.Lock()
 	defer r.lck.Unlock()
+	if r.allStopAtNano != 0 {
+		err = ErrStopAcceptingCommands
+		return
+	}
 	for idx, inst := range r.runInsts {
 		if inst != nil {
 			continue

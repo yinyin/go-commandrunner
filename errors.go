@@ -7,6 +7,8 @@ import (
 
 var ErrExceededMaxRunningCommands = errors.New("exceeded maximum number of running commands")
 
+var ErrStopAcceptingCommands = errors.New("stopping accepting new run command requests")
+
 type ErrSetupCommandFailed struct {
 	SetupFuncIndex int
 	Err            error
